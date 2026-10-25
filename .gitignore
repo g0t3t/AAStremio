@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local secrets (never commit)
+keys/
+*.jks
+*.keystore
+*.p12
+secrets.env
+
+# Official upstream APKs (downloaded at build time)
+upstream/
+*.apk
+*.apks
+*.xapk
+
+# Build output and scratch space
+dist/
+.work/
+build-meta.json
+release-notes.md
+emulator-*.png
+*.idsig
+*.log
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local DHU test artifacts
+phone-land*.png
+ui.xml
+aastremio-aa.png

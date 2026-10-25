@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "package": "com.aastremio.app",
+  "basePort": 11475,
+  "officialSignerSha256": "7e6a979c968f771e3fbcf2c2e8718ce61e708d87caf91fc13e2d4c19a8022c6b",
+  "upstream": {
+    "version": "2.4.0",
+    "sourcePage": "https://www.stremio.com/downloads",
+    "apks": {
+      "arm64-v8a": {
+        "url": "https://dl.strem.io/android/v2.4.0-android/com.stremio.one-2.4.0-8145728-arm64-v8a.apk",
+        "versionCode": 8145728,
+        "sha256": "9b198b4682123057e29612ace5c05780c93fb71537ea362aac0d8163dd425eff"
+      },
+      "armeabi-v7a": {
+        "url": "https://dl.strem.io/android/v2.4.0-android/com.stremio.one-2.4.0-6048576-armeabi-v7a.apk",
+        "versionCode": 6048576,
+        "sha256": "98392bb8dbda3898319d3640cca4439cbb3af29f2ff17928ba6674fb09a728ce"
+      }
+    }
+  },
+  "lastBuilt": {
+    "version": "2.4.0",
+    "patchRevision": 1,
+    "at": "2026-10-25T16:11:45+00:00"
+  }
+}

@@ -1,0 +1,175 @@
+name: Build AAStremio
+
+on:
+  schedule:
+    # 03:00 UTC on the 1st and 15th: roughly every two weeks.
+    - cron: "0 3 1,15 * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Build even if the upstream version and hashes are unchanged
+        type: boolean
+        default: false
+      version:
+        description: Override upstream version (optional)
+        type: string
+        required: false
+      arm64_url:
+        description: Override ARM64 APK URL (optional)
+        type: string
+        required: false
+      arm_url:
+        description: Override ARM APK URL (optional)
+        type: string
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: aastremio-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and release
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Install Android build-tools
+        run: |
+          set -euo pipefail
+          SDKMGR=$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort -V | tail -n 1)
+          test -n "$SDKMGR"
+          yes | "$SDKMGR" --licenses >/dev/null || true
+          "$SDKMGR" "build-tools;36.1.0" "platforms;android-36"
+
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Download and verify Apktool
+        run: |
+          mkdir -p tools
+          curl -L --fail --retry 3 \
+            -o tools/apktool.jar \
+            https://github.com/iBotPeaches/Apktool/releases/download/v2.12.1/apktool_2.12.1.jar
+          echo "66cf4524a4a45a7f56567d08b2c9b6ec237bcdd78cee69fd4a59c8a0243aeafa  tools/apktool.jar" | sha256sum -c -
+
+      - name: Resolve upstream and verify hashes
+        id: resolve
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCE: ${{ inputs.force }}
+          OVERRIDE_VERSION: ${{ inputs.version }}
+          ARM64_URL: ${{ inputs.arm64_url }}
+          ARM_URL: ${{ inputs.arm_url }}
+        run: |
+          set -euo pipefail
+          export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          export AASTREMIO_APKSIGNER="$ANDROID_SDK_ROOT/build-tools/36.1.0/apksigner"
+          args=()
+          if [ "${FORCE:-false}" = "true" ]; then args+=(--force); fi
+          if [ -n "${OVERRIDE_VERSION:-}" ]; then args+=(--version "$OVERRIDE_VERSION"); fi
+          if [ -n "${ARM64_URL:-}" ]; then args+=(--arm64-url "$ARM64_URL"); fi
+          if [ -n "${ARM_URL:-}" ]; then args+=(--arm-url "$ARM_URL"); fi
+          python scripts/resolve_upstream.py \
+            --download-dir upstream \
+            --output build-meta.json \
+            --repo "$GITHUB_REPOSITORY" \
+            --token "$GITHUB_TOKEN" \
+            "${args[@]}"
+
+      - name: Nothing to build
+        if: steps.resolve.outputs.should_build != 'true'
+        run: |
+          echo "Upstream is unchanged (reason: ${{ steps.resolve.outputs.reason }})."
+          echo "Use workflow_dispatch with force=true to rebuild anyway."
+
+      - name: Build, verify, release
+        if: steps.resolve.outputs.should_build == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          AASTREMIO_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          AASTREMIO_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          AASTREMIO_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          APKTOOL_JAR: tools/apktool.jar
+          VERSION: ${{ steps.resolve.outputs.version }}
+          PATCH_REVISION: ${{ steps.resolve.outputs.patch_revision }}
+        run: |
+          set -euo pipefail
+          mkdir -p keys dist
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > keys/release.jks
+          test -s keys/release.jks
+
+          SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          BUILD_TOOLS="$SDK_ROOT/build-tools/36.1.0"
+
+          for abi in arm64-v8a armeabi-v7a; do
+            version_code=$(python -c "import json; print(json.load(open('build-meta.json'))['apks']['$abi']['versionCode'])")
+            input_apk=$(python -c "import json; print(json.load(open('build-meta.json'))['apks']['$abi']['file'])")
+            output_apk="dist/AAStremio-${VERSION}-aastremio.${PATCH_REVISION}-${abi}.apk"
+
+            python scripts/patch_apk.py \
+              --input "$input_apk" \
+              --output "$output_apk" \
+              --upstream-version "$VERSION" \
+              --upstream-version-code "$version_code" \
+              --abi "$abi" \
+              --patch-revision "$PATCH_REVISION" \
+              --keystore keys/release.jks \
+              --apktool tools/apktool.jar \
+              --zipalign "$BUILD_TOOLS/zipalign" \
+              --apksigner "$BUILD_TOOLS/apksigner" \
+              --aapt2 "$BUILD_TOOLS/aapt2"
+          done
+
+          cd dist
+          sha256sum ./*.apk > SHA256SUMS.txt
+          cd ..
+
+          python scripts/release_notes.py \
+            --meta build-meta.json \
+            --dist dist \
+            --output release-notes.md
+
+          TAG="v${VERSION}-aastremio.${PATCH_REVISION}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/*.apk dist/SHA256SUMS.txt --clobber
+          else
+            gh release create "$TAG" \
+              dist/*.apk \
+              dist/SHA256SUMS.txt \
+              --title "AAStremio ${VERSION}" \
+              --notes-file release-notes.md
+          fi
+
+          python scripts/update_versions.py --meta build-meta.json --versions versions.json
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add versions.json
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: pin Stremio ${VERSION} [skip ci]"
+            git push
+          fi
